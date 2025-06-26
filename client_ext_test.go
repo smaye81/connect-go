@@ -181,13 +181,14 @@ func TestClientPeer(t *testing.T) {
 			assert.Nil(t, err)
 		})
 		t.Run("client_stream simple", func(t *testing.T) {
+			ctx, callInfo := connect.NewOutgoingContext(ctx)
 			clientStream := clientSimple.Sum(ctx)
 			t.Cleanup(func() {
 				_, closeErr := clientStream.CloseAndReceive()
 				assert.Nil(t, closeErr)
 			})
-			assert.NotZero(t, clientStream.Peer().Addr)
-			assert.NotZero(t, clientStream.Peer().Protocol)
+			assert.NotZero(t, callInfo.Peer().Addr)
+			assert.NotZero(t, callInfo.Peer().Protocol)
 			err := clientStream.Send(&pingv1.SumRequest{})
 			assert.Nil(t, err)
 		})
@@ -632,6 +633,33 @@ func TestDynamicClient(t *testing.T) {
 			return
 		}
 		got := rsp.Msg.Get(methodDesc.Output().Fields().ByName("sum")).Int()
+		assert.Equal(t, got, 42*2)
+	})
+	t.Run("clientStream simple", func(t *testing.T) {
+		t.Parallel()
+		desc, err := protoregistry.GlobalFiles.FindDescriptorByName("connect.ping.v1.PingService.Sum")
+		assert.Nil(t, err)
+		methodDesc, ok := desc.(protoreflect.MethodDescriptor)
+		assert.True(t, ok)
+		client := connect.NewClient[dynamicpb.Message, dynamicpb.Message](
+			server.Client(),
+			server.URL()+"/connect.ping.v1.PingService/Sum",
+			connect.WithSchema(methodDesc),
+			connect.WithResponseInitializer(initializer),
+		)
+		stream := client.CallClientStreamSimple(ctx)
+		msg := dynamicpb.NewMessage(methodDesc.Input())
+		msg.Set(
+			methodDesc.Input().Fields().ByName("number"),
+			protoreflect.ValueOfInt64(42),
+		)
+		assert.Nil(t, stream.Send(msg))
+		assert.Nil(t, stream.Send(msg))
+		rsp, err := stream.CloseAndReceive()
+		if !assert.Nil(t, err) {
+			return
+		}
+		got := rsp.Get(methodDesc.Output().Fields().ByName("sum")).Int()
 		assert.Equal(t, got, 42*2)
 	})
 	t.Run("serverStream", func(t *testing.T) {

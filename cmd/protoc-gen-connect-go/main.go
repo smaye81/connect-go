@@ -398,7 +398,11 @@ func generateClientMethod(g *protogen.GeneratedFile, method *protogen.Method, na
 
 	switch {
 	case isStreamingClient && !isStreamingServer:
-		g.P("return c.", unexport(method.GoName), ".CallClientStream(ctx)")
+		if isSimpleAPI(apiType) {
+			g.P("return c.", unexport(method.GoName), ".CallClientStreamSimple(ctx)")
+		} else {
+			g.P("return c.", unexport(method.GoName), ".CallClientStream(ctx)")
+		}
 	case !isStreamingClient && isStreamingServer:
 		if isSimpleAPI(apiType) {
 			g.P("return c.", unexport(method.GoName), ".CallServerStreamSimple(ctx, req)")
@@ -432,6 +436,11 @@ func clientSignature(g *protogen.GeneratedFile, method *protogen.Method, named b
 	}
 	if method.Desc.IsStreamingClient() {
 		// client streaming
+		if isSimpleAPI(apiType) {
+			return method.GoName + "(" + ctxName + " " + g.QualifiedGoIdent(contextPackage.Ident("Context")) + ") " +
+				"*" + g.QualifiedGoIdent(connectPackage.Ident("ClientStreamForClientSimple")) +
+				"[" + g.QualifiedGoIdent(method.Input.GoIdent) + ", " + g.QualifiedGoIdent(method.Output.GoIdent) + "]"
+		}
 		return method.GoName + "(" + ctxName + " " + g.QualifiedGoIdent(contextPackage.Ident("Context")) + ") " +
 			"*" + g.QualifiedGoIdent(connectPackage.Ident("ClientStreamForClient")) +
 			"[" + g.QualifiedGoIdent(method.Input.GoIdent) + ", " + g.QualifiedGoIdent(method.Output.GoIdent) + "]"
@@ -497,7 +506,11 @@ func generateServerConstructor(g *protogen.GeneratedFile, file *protogen.File, s
 		idempotency := methodIdempotency(method)
 		switch {
 		case isStreamingClient && !isStreamingServer:
-			g.P(procedureHandlerName(method), ` := `, connectPackage.Ident("NewClientStreamHandler"), "(")
+			if isSimpleAPI(apiType) {
+				g.P(procedureHandlerName(method), ` := `, connectPackage.Ident("NewClientStreamHandlerSimple"), "(")
+			} else {
+				g.P(procedureHandlerName(method), ` := `, connectPackage.Ident("NewClientStreamHandler"), "(")
+			}
 		case !isStreamingClient && isStreamingServer:
 			if isSimpleAPI(apiType) {
 				g.P(procedureHandlerName(method), ` := `, connectPackage.Ident("NewServerStreamHandlerSimple"), "(")
@@ -581,6 +594,12 @@ func serverSignatureParams(g *protogen.GeneratedFile, method *protogen.Method, n
 	}
 	if method.Desc.IsStreamingClient() {
 		// client streaming
+		if isSimpleAPI(apiType) {
+			return "(" + ctxName + g.QualifiedGoIdent(contextPackage.Ident("Context")) + ", " +
+				streamName + "*" + g.QualifiedGoIdent(connectPackage.Ident("ClientStream")) +
+				"[" + g.QualifiedGoIdent(method.Input.GoIdent) + "]" +
+				") (*" + g.QualifiedGoIdent(method.Output.GoIdent) + ", error)"
+		}
 		return "(" + ctxName + g.QualifiedGoIdent(contextPackage.Ident("Context")) + ", " +
 			streamName + "*" + g.QualifiedGoIdent(connectPackage.Ident("ClientStream")) +
 			"[" + g.QualifiedGoIdent(method.Input.GoIdent) + "]" +

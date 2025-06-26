@@ -64,7 +64,10 @@ const (
 
 func TestServer(t *testing.T) {
 	t.Parallel()
-	testPing := func(t *testing.T, client pingv1connect.PingServiceClient) { //nolint:thelper
+	testPing := func(t *testing.T, httpClient *http.Client, url string, opts ...connect.ClientOption) { //nolint:thelper
+		client := pingv1connect.NewPingServiceClient(httpClient, url, opts...)
+		clientSimple := pingv1connectsimple.NewPingServiceClient(httpClient, url, opts...)
+
 		t.Run("ping", func(t *testing.T) {
 			num := int64(42)
 			request := connect.NewRequest(&pingv1.PingRequest{Number: num})
@@ -76,6 +79,17 @@ func TestServer(t *testing.T) {
 			assert.Equal(t, response.Header().Values(handlerHeader), []string{headerValue})
 			assert.Equal(t, response.Trailer().Values(handlerTrailer), []string{trailerValue})
 		})
+		t.Run("ping simple", func(t *testing.T) {
+			num := int64(42)
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			callInfo.RequestHeader().Set(clientHeader, headerValue)
+			expect := &pingv1.PingResponse{Number: num}
+			response, err := clientSimple.Ping(ctx, &pingv1.PingRequest{Number: num})
+			assert.Nil(t, err)
+			assert.Equal(t, response, expect)
+			assert.Equal(t, callInfo.ResponseHeader().Values(handlerHeader), []string{headerValue})
+			assert.Equal(t, callInfo.ResponseTrailer().Values(handlerTrailer), []string{trailerValue})
+		})
 		t.Run("zero_ping", func(t *testing.T) {
 			request := connect.NewRequest(&pingv1.PingRequest{})
 			request.Header().Set(clientHeader, headerValue)
@@ -85,6 +99,16 @@ func TestServer(t *testing.T) {
 			assert.Equal(t, response.Msg, &expect)
 			assert.Equal(t, response.Header().Values(handlerHeader), []string{headerValue})
 			assert.Equal(t, response.Trailer().Values(handlerTrailer), []string{trailerValue})
+		})
+		t.Run("zero_ping simple", func(t *testing.T) {
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			callInfo.RequestHeader().Set(clientHeader, headerValue)
+			response, err := clientSimple.Ping(ctx, &pingv1.PingRequest{})
+			assert.Nil(t, err)
+			var expect pingv1.PingResponse
+			assert.Equal(t, response, &expect)
+			assert.Equal(t, callInfo.ResponseHeader().Values(handlerHeader), []string{headerValue})
+			assert.Equal(t, callInfo.ResponseTrailer().Values(handlerTrailer), []string{trailerValue})
 		})
 		t.Run("large_ping", func(t *testing.T) {
 			// Using a large payload splits the request and response over multiple
@@ -102,10 +126,33 @@ func TestServer(t *testing.T) {
 			assert.Equal(t, response.Header().Values(handlerHeader), []string{headerValue})
 			assert.Equal(t, response.Trailer().Values(handlerTrailer), []string{trailerValue})
 		})
+		t.Run("large_ping simple", func(t *testing.T) {
+			// Using a large payload splits the request and response over multiple
+			// packets, ensuring that we're managing HTTP readers and writers
+			// correctly.
+			if testing.Short() {
+				t.Skipf("skipping %s test in short mode", t.Name())
+			}
+			hellos := strings.Repeat("hello", 1024*1024) // ~5mb
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			callInfo.RequestHeader().Set(clientHeader, headerValue)
+			response, err := clientSimple.Ping(ctx, &pingv1.PingRequest{Text: hellos})
+			assert.Nil(t, err)
+			assert.Equal(t, response.GetText(), hellos)
+			assert.Equal(t, callInfo.ResponseHeader().Values(handlerHeader), []string{headerValue})
+			assert.Equal(t, callInfo.ResponseTrailer().Values(handlerTrailer), []string{trailerValue})
+		})
 		t.Run("ping_error", func(t *testing.T) {
 			_, err := client.Ping(
 				context.Background(),
 				connect.NewRequest(&pingv1.PingRequest{}),
+			)
+			assert.Equal(t, connect.CodeOf(err), connect.CodeInvalidArgument)
+		})
+		t.Run("ping_error simple", func(t *testing.T) {
+			_, err := clientSimple.Ping(
+				context.Background(),
+				&pingv1.PingRequest{},
 			)
 			assert.Equal(t, connect.CodeOf(err), connect.CodeInvalidArgument)
 		})
@@ -115,6 +162,14 @@ func TestServer(t *testing.T) {
 			request := connect.NewRequest(&pingv1.PingRequest{})
 			request.Header().Set(clientHeader, headerValue)
 			_, err := client.Ping(ctx, request)
+			assert.Equal(t, connect.CodeOf(err), connect.CodeDeadlineExceeded)
+		})
+		t.Run("ping_timeout simple", func(t *testing.T) {
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			defer cancel()
+			ctx, callInfo := connect.NewOutgoingContext(ctx)
+			callInfo.RequestHeader().Set(clientHeader, headerValue)
+			_, err := clientSimple.Ping(ctx, &pingv1.PingRequest{})
 			assert.Equal(t, connect.CodeOf(err), connect.CodeDeadlineExceeded)
 		})
 	}
@@ -375,11 +430,11 @@ func TestServer(t *testing.T) {
 			assertIsHTTPMiddlewareError(t, stream.Err())
 		})
 	}
-	testMatrix := func(t *testing.T, client *http.Client, url string, bidi bool) { //nolint:thelper
+	testMatrix := func(t *testing.T, httpClient *http.Client, url string, bidi bool) { //nolint:thelper
 		run := func(t *testing.T, opts ...connect.ClientOption) {
 			t.Helper()
-			client := pingv1connect.NewPingServiceClient(client, url, opts...)
-			testPing(t, client)
+			client := pingv1connect.NewPingServiceClient(httpClient, url, opts...)
+			testPing(t, httpClient, url, opts...)
 			testSum(t, client)
 			testCountUp(t, client)
 			testCumSum(t, client, bidi)
@@ -613,8 +668,11 @@ func TestErrorHeaderPropagation(t *testing.T) {
 			assert.Equal(t, meta.Values("X-Test"), []string(nil))
 		}
 	}
-	testServices := func(t *testing.T, client pingv1connect.PingServiceClient) {
+	testServices := func(t *testing.T, opts ...connect.ClientOption) {
 		t.Helper()
+		client := pingv1connect.NewPingServiceClient(server.Client(), server.URL(), opts...)
+		clientSimple := pingv1connectsimple.NewPingServiceClient(server.Client(), server.URL(), opts...)
+
 		t.Run("unary", func(t *testing.T) {
 			request := connect.NewRequest(&pingv1.PingRequest{})
 			request.Header().Set("X-Test", t.Name())
@@ -628,6 +686,25 @@ func TestErrorHeaderPropagation(t *testing.T) {
 				request.Header().Set("X-Test", t.Name())
 				request.Header().Set("X-Test-Is-Wire", "true")
 				_, err := client.Ping(context.Background(), request)
+				if !assert.NotNil(t, err) {
+					return
+				}
+				assertError(t, err, false /* allowCustomHeaders */)
+			})
+		})
+		t.Run("unary simple", func(t *testing.T) {
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			callInfo.RequestHeader().Set("X-Test", t.Name())
+			_, err := clientSimple.Ping(ctx, &pingv1.PingRequest{})
+			if !assert.NotNil(t, err) {
+				return
+			}
+			assertError(t, err, true /* allowCustomHeaders */)
+			t.Run("wire", func(t *testing.T) {
+				ctx, callInfo := connect.NewOutgoingContext(context.Background())
+				callInfo.RequestHeader().Set("X-Test", t.Name())
+				callInfo.RequestHeader().Set("X-Test-Is-Wire", "true")
+				_, err := clientSimple.Ping(ctx, &pingv1.PingRequest{})
 				if !assert.NotNil(t, err) {
 					return
 				}
@@ -661,18 +738,15 @@ func TestErrorHeaderPropagation(t *testing.T) {
 	}
 	t.Run("connect", func(t *testing.T) {
 		t.Parallel()
-		client := pingv1connect.NewPingServiceClient(server.Client(), server.URL())
-		testServices(t, client)
+		testServices(t)
 	})
 	t.Run("grpc", func(t *testing.T) {
 		t.Parallel()
-		client := pingv1connect.NewPingServiceClient(server.Client(), server.URL(), connect.WithGRPC())
-		testServices(t, client)
+		testServices(t, connect.WithGRPC())
 	})
 	t.Run("grpc-web", func(t *testing.T) {
 		t.Parallel()
-		client := pingv1connect.NewPingServiceClient(server.Client(), server.URL(), connect.WithGRPCWeb())
-		testServices(t, client)
+		testServices(t, connect.WithGRPCWeb())
 	})
 }
 
@@ -2974,8 +3048,12 @@ func handleSum(
 func (p pingServerSimple) Sum(
 	ctx context.Context,
 	stream *connect.ClientStream[pingv1.SumRequest],
-) (*connect.Response[pingv1.SumResponse], error) {
-	return handleSum(stream, p.checkMetadata)
+) (*pingv1.SumResponse, error) {
+	resp, err := handleSum(stream, p.checkMetadata)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
 }
 
 func handleCumSum(stream *connect.BidiStream[pingv1.CumSumRequest, pingv1.CumSumResponse], checkMetadata bool) error {

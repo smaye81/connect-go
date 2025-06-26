@@ -20,11 +20,12 @@ import (
 	"net/http"
 )
 
-// ClientStreamForClient is the client's view of a client streaming RPC.
+// ClientStreamForClientSimple is the client's view of a client streaming RPC.
+// using the simple API
 //
 // It's returned from [Client].CallClientStream, but doesn't currently have an
 // exported constructor function.
-type ClientStreamForClient[Req, Res any] struct {
+type ClientStreamForClientSimple[Req, Res any] struct {
 	conn        StreamingClientConn
 	initializer maybeInitializer
 	// Error from client construction. If non-nil, return for all calls.
@@ -32,25 +33,13 @@ type ClientStreamForClient[Req, Res any] struct {
 }
 
 // Spec returns the specification for the RPC.
-func (c *ClientStreamForClient[_, _]) Spec() Spec {
+func (c *ClientStreamForClientSimple[_, _]) Spec() Spec {
 	return c.conn.Spec()
 }
 
 // Peer describes the server for the RPC.
-func (c *ClientStreamForClient[_, _]) Peer() Peer {
+func (c *ClientStreamForClientSimple[_, _]) Peer() Peer {
 	return c.conn.Peer()
-}
-
-// RequestHeader returns the request headers. Headers are sent to the server with the
-// first call to Send.
-//
-// Headers beginning with "Connect-" and "Grpc-" are reserved for use by the
-// Connect and gRPC protocols. Applications shouldn't write them.
-func (c *ClientStreamForClient[Req, Res]) RequestHeader() http.Header {
-	if c.err != nil {
-		return http.Header{}
-	}
-	return c.conn.RequestHeader()
 }
 
 // Send a message to the server. The first call to Send also sends the request
@@ -59,7 +48,7 @@ func (c *ClientStreamForClient[Req, Res]) RequestHeader() http.Header {
 // If the server returns an error, Send returns an error that wraps [io.EOF].
 // Clients should check for case using the standard library's [errors.Is] and
 // unmarshal the error using CloseAndReceive.
-func (c *ClientStreamForClient[Req, Res]) Send(request *Req) error {
+func (c *ClientStreamForClientSimple[Req, Res]) Send(request *Req) error {
 	if c.err != nil {
 		return c.err
 	}
@@ -71,7 +60,7 @@ func (c *ClientStreamForClient[Req, Res]) Send(request *Req) error {
 
 // CloseAndReceive closes the send side of the stream and waits for the
 // response.
-func (c *ClientStreamForClient[Req, Res]) CloseAndReceive() (*Response[Res], error) {
+func (c *ClientStreamForClientSimple[Req, Res]) CloseAndReceive() (*Res, error) {
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -84,13 +73,77 @@ func (c *ClientStreamForClient[Req, Res]) CloseAndReceive() (*Response[Res], err
 		_ = c.conn.CloseResponse()
 		return nil, err
 	}
-	return response, c.conn.CloseResponse()
+	return response.Msg, c.conn.CloseResponse()
+}
+
+// Conn exposes the underlying StreamingClientConn. This may be useful if
+// you'd prefer to wrap the connection in a different high-level API.
+func (c *ClientStreamForClientSimple[Req, Res]) Conn() (StreamingClientConn, error) {
+	return c.conn, c.err
+}
+
+// ClientStreamForClient is the client's view of a client streaming RPC.
+//
+// It's returned from [Client].CallClientStream, but doesn't currently have an
+// exported constructor function.
+type ClientStreamForClient[Req, Res any] struct {
+	clientStream *ClientStreamForClientSimple[Req, Res]
+}
+
+// Spec returns the specification for the RPC.
+func (c *ClientStreamForClient[_, _]) Spec() Spec {
+	return c.clientStream.Spec()
+}
+
+// Peer describes the server for the RPC.
+func (c *ClientStreamForClient[_, _]) Peer() Peer {
+	return c.clientStream.Peer()
+}
+
+// RequestHeader returns the request headers. Headers are sent to the server with the
+// first call to Send.
+//
+// Headers beginning with "Connect-" and "Grpc-" are reserved for use by the
+// Connect and gRPC protocols. Applications shouldn't write them.
+func (c *ClientStreamForClient[Req, Res]) RequestHeader() http.Header {
+	if c.clientStream.err != nil {
+		return http.Header{}
+	}
+	return c.clientStream.conn.RequestHeader()
+}
+
+// Send a message to the server. The first call to Send also sends the request
+// headers.
+//
+// If the server returns an error, Send returns an error that wraps [io.EOF].
+// Clients should check for case using the standard library's [errors.Is] and
+// unmarshal the error using CloseAndReceive.
+func (c *ClientStreamForClient[Req, Res]) Send(request *Req) error {
+	return c.clientStream.Send(request)
+}
+
+// CloseAndReceive closes the send side of the stream and waits for the
+// response.
+func (c *ClientStreamForClient[Req, Res]) CloseAndReceive() (*Response[Res], error) {
+	if c.clientStream.err != nil {
+		return nil, c.clientStream.err
+	}
+	if err := c.clientStream.conn.CloseRequest(); err != nil {
+		_ = c.clientStream.conn.CloseResponse()
+		return nil, err
+	}
+	response, err := receiveUnaryResponse[Res](c.clientStream.conn, c.clientStream.initializer)
+	if err != nil {
+		_ = c.clientStream.conn.CloseResponse()
+		return nil, err
+	}
+	return response, c.clientStream.conn.CloseResponse()
 }
 
 // Conn exposes the underlying StreamingClientConn. This may be useful if
 // you'd prefer to wrap the connection in a different high-level API.
 func (c *ClientStreamForClient[Req, Res]) Conn() (StreamingClientConn, error) {
-	return c.conn, c.err
+	return c.clientStream.Conn()
 }
 
 // ServerStreamForClient is the client's view of a server streaming RPC.

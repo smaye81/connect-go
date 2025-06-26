@@ -163,12 +163,61 @@ func (c *Client[Req, Res]) CallUnarySimple(ctx context.Context, requestMsg *Req)
 // CallClientStream calls a client streaming procedure.
 func (c *Client[Req, Res]) CallClientStream(ctx context.Context) *ClientStreamForClient[Req, Res] {
 	if c.err != nil {
-		return &ClientStreamForClient[Req, Res]{err: c.err}
+		return &ClientStreamForClient[Req, Res]{
+			clientStream: &ClientStreamForClientSimple[Req, Res]{
+				err: c.err,
+			},
+		}
 	}
 	return &ClientStreamForClient[Req, Res]{
-		conn:        c.newConn(ctx, StreamTypeClient, nil),
+		clientStream: &ClientStreamForClientSimple[Req, Res]{
+			conn:        c.newConn(ctx, StreamTypeClient, nil),
+			initializer: c.config.Initializer,
+		},
+	}
+}
+
+// CallClientStreamSimple calls a client streaming procedure.
+func (c *Client[Req, Res]) CallClientStreamSimple(ctx context.Context) *ClientStreamForClientSimple[Req, Res] {
+	if c.err != nil {
+		return &ClientStreamForClientSimple[Req, Res]{
+			err: c.err,
+		}
+	}
+	ctx, ctxCallInfo := NewOutgoingContext(ctx)
+
+	conn := c.newConn(ctx, StreamTypeClient, nil)
+
+	// Here we set anything that's set on the request after its made (peer, method, spec)
+	info, ok := ctxCallInfo.(*callInfo)
+	if ok {
+		info.peer = conn.Peer()
+		info.spec = conn.Spec()
+	}
+	return &ClientStreamForClientSimple[Req, Res]{
+		conn:        conn,
 		initializer: c.config.Initializer,
 	}
+	// req := requestFromContext(ctx, requestMsg)
+
+	// response, err := c.CallUnary(ctx, req)
+
+	// // Here we set anything that's set on the request after its made (peer, method, spec)
+	// info, ok := ctxCallInfo.(*callInfo)
+	// if ok {
+	// 	info.peer = req.Peer()
+	// 	info.spec = req.Spec()
+	// 	info.method = req.HTTPMethod()
+	// }
+
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// maps.Copy(info.ResponseHeader(), response.Header())
+	// maps.Copy(info.ResponseTrailer(), response.Trailer())
+
+	// return response.Msg, err
 }
 
 // CallServerStream calls a server streaming procedure.

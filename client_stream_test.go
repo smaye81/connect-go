@@ -24,10 +24,27 @@ import (
 	pingv1 "connectrpc.com/connect/internal/gen/connect/ping/v1"
 )
 
+func TestClientStreamForClientSimple_NoPanics(t *testing.T) {
+	t.Parallel()
+	initErr := errors.New("client init failure")
+	clientStream := &ClientStreamForClientSimple[pingv1.PingRequest, pingv1.PingResponse]{err: initErr}
+	assert.ErrorIs(t, clientStream.Send(&pingv1.PingRequest{}), initErr)
+	res, err := clientStream.CloseAndReceive()
+	assert.Nil(t, res)
+	assert.ErrorIs(t, err, initErr)
+	conn, err := clientStream.Conn()
+	assert.NotNil(t, err)
+	assert.Nil(t, conn)
+}
+
 func TestClientStreamForClient_NoPanics(t *testing.T) {
 	t.Parallel()
 	initErr := errors.New("client init failure")
-	clientStream := &ClientStreamForClient[pingv1.PingRequest, pingv1.PingResponse]{err: initErr}
+	clientStream := &ClientStreamForClient[pingv1.PingRequest, pingv1.PingResponse]{
+		clientStream: &ClientStreamForClientSimple[pingv1.PingRequest, pingv1.PingResponse]{
+			err: initErr,
+		},
+	}
 	assert.ErrorIs(t, clientStream.Send(&pingv1.PingRequest{}), initErr)
 	verifyHeaders(t, clientStream.RequestHeader())
 	res, err := clientStream.CloseAndReceive()

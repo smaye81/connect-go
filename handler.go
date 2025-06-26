@@ -151,6 +151,37 @@ func NewClientStreamHandler[Req, Res any](
 	)
 }
 
+// NewClientStreamHandlerSimple constructs a [Handler] for a client streaming procedure.
+func NewClientStreamHandlerSimple[Req, Res any](
+	procedure string,
+	implementation func(context.Context, *ClientStream[Req]) (*Res, error),
+	options ...HandlerOption,
+) *Handler {
+	return NewClientStreamHandler(
+		procedure,
+		func(ctx context.Context, stream *ClientStream[Req]) (*Response[Res], error) {
+			ctx, ci := NewOutgoingContext(ctx)
+			call, ok := ci.(*callInfo)
+			if ok {
+				call.peer = stream.Peer()
+				call.spec = stream.Spec()
+				call.requestHeader = stream.RequestHeader()
+			}
+
+			responseMsg, err := implementation(ctx, stream)
+
+			if responseMsg != nil {
+				response := NewResponse(responseMsg)
+				response.setHeader(call.ResponseHeader())
+				response.setTrailer(call.ResponseTrailer())
+				return response, err
+			}
+			return nil, err
+		},
+		options...,
+	)
+}
+
 // NewServerStreamHandler constructs a [Handler] for a server streaming procedure.
 func NewServerStreamHandler[Req, Res any](
 	procedure string,
