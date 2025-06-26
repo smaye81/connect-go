@@ -62,7 +62,7 @@ const (
 	clientMiddlewareErrorHeader = "Connect-Trigger-HTTP-Error"
 )
 
-func TestServer(t *testing.T) {
+func TestServer(t *testing.T) { //nolint:gocyclo
 	t.Parallel()
 	testPing := func(t *testing.T, httpClient *http.Client, url string, opts ...connect.ClientOption) { //nolint:thelper
 		client := pingv1connect.NewPingServiceClient(httpClient, url, opts...)
@@ -173,7 +173,10 @@ func TestServer(t *testing.T) {
 			assert.Equal(t, connect.CodeOf(err), connect.CodeDeadlineExceeded)
 		})
 	}
-	testSum := func(t *testing.T, client pingv1connect.PingServiceClient) { //nolint:thelper
+	testSum := func(t *testing.T, httpClient *http.Client, url string, opts ...connect.ClientOption) { //nolint:thelper
+		client := pingv1connect.NewPingServiceClient(httpClient, url, opts...)
+		clientSimple := pingv1connectsimple.NewPingServiceClient(httpClient, url, opts...)
+
 		t.Run("sum", func(t *testing.T) {
 			const (
 				upTo   = 10
@@ -191,8 +194,35 @@ func TestServer(t *testing.T) {
 			assert.Equal(t, response.Header().Values(handlerHeader), []string{headerValue})
 			assert.Equal(t, response.Trailer().Values(handlerTrailer), []string{trailerValue})
 		})
+		t.Run("sum simple", func(t *testing.T) {
+			const (
+				upTo   = 10
+				expect = 55 // 1+10 + 2+9 + ... + 5+6 = 55
+			)
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			stream := clientSimple.Sum(ctx)
+			callInfo.RequestHeader().Set(clientHeader, headerValue)
+			for i := range upTo {
+				err := stream.Send(&pingv1.SumRequest{Number: int64(i + 1)})
+				assert.Nil(t, err, assert.Sprintf("send %d", i))
+			}
+			response, err := stream.CloseAndReceive()
+			assert.Nil(t, err)
+			assert.Equal(t, response.GetSum(), expect)
+			assert.Equal(t, callInfo.ResponseHeader().Values(handlerHeader), []string{headerValue})
+			assert.Equal(t, callInfo.ResponseTrailer().Values(handlerTrailer), []string{trailerValue})
+		})
 		t.Run("sum_error", func(t *testing.T) {
 			stream := client.Sum(context.Background())
+			if err := stream.Send(&pingv1.SumRequest{Number: 1}); err != nil {
+				assert.ErrorIs(t, err, io.EOF)
+				assert.Equal(t, connect.CodeOf(err), connect.CodeUnknown)
+			}
+			_, err := stream.CloseAndReceive()
+			assert.Equal(t, connect.CodeOf(err), connect.CodeInvalidArgument)
+		})
+		t.Run("sum_error_simple", func(t *testing.T) {
+			stream := clientSimple.Sum(context.Background())
 			if err := stream.Send(&pingv1.SumRequest{Number: 1}); err != nil {
 				assert.ErrorIs(t, err, io.EOF)
 				assert.Equal(t, connect.CodeOf(err), connect.CodeUnknown)
@@ -208,8 +238,19 @@ func TestServer(t *testing.T) {
 			assert.Equal(t, got.Msg, &pingv1.SumResponse{}) // receive header only stream
 			assert.Equal(t, got.Header().Values(handlerHeader), []string{headerValue})
 		})
+		t.Run("sum_close_and_receive_without_send_simple", func(t *testing.T) {
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			stream := clientSimple.Sum(ctx)
+			callInfo.RequestHeader().Set(clientHeader, headerValue)
+			got, err := stream.CloseAndReceive()
+			assert.Nil(t, err)
+			assert.Equal(t, got, &pingv1.SumResponse{}) // receive header only stream
+			assert.Equal(t, callInfo.ResponseHeader().Values(handlerHeader), []string{headerValue})
+		})
 	}
-	testCountUp := func(t *testing.T, client pingv1connect.PingServiceClient) { //nolint:thelper
+	testCountUp := func(t *testing.T, httpClient *http.Client, url string, opts ...connect.ClientOption) { //nolint:thelper
+		client := pingv1connect.NewPingServiceClient(httpClient, url, opts...)
+		clientSimple := pingv1connectsimple.NewPingServiceClient(httpClient, url, opts...)
 		t.Run("count_up", func(t *testing.T) {
 			const upTo = 5
 			got := make([]int64, 0, upTo)
@@ -220,6 +261,24 @@ func TestServer(t *testing.T) {
 			request := connect.NewRequest(&pingv1.CountUpRequest{Number: upTo})
 			request.Header().Set(clientHeader, headerValue)
 			stream, err := client.CountUp(context.Background(), request)
+			assert.Nil(t, err)
+			for stream.Receive() {
+				got = append(got, stream.Msg().GetNumber())
+			}
+			assert.Nil(t, stream.Err())
+			assert.Nil(t, stream.Close())
+			assert.Equal(t, got, expect)
+		})
+		t.Run("count_up_simple", func(t *testing.T) {
+			const upTo = 5
+			got := make([]int64, 0, upTo)
+			expect := make([]int64, 0, upTo)
+			for i := range upTo {
+				expect = append(expect, int64(i+1))
+			}
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			callInfo.RequestHeader().Set(clientHeader, headerValue)
+			stream, err := clientSimple.CountUp(ctx, &pingv1.CountUpRequest{Number: upTo})
 			assert.Nil(t, err)
 			for stream.Receive() {
 				got = append(got, stream.Msg().GetNumber())
@@ -246,10 +305,35 @@ func TestServer(t *testing.T) {
 			)
 			assert.Nil(t, stream.Close())
 		})
+		t.Run("count_up_error_simple", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			stream, err := clientSimple.CountUp(
+				ctx,
+				&pingv1.CountUpRequest{Number: 1},
+			)
+			assert.Nil(t, err)
+			for stream.Receive() {
+				t.Fatalf("expected error, shouldn't receive any messages")
+			}
+			assert.Equal(
+				t,
+				connect.CodeOf(stream.Err()),
+				connect.CodeInvalidArgument,
+			)
+			assert.Nil(t, stream.Close())
+		})
 		t.Run("count_up_timeout", func(t *testing.T) {
 			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 			t.Cleanup(cancel)
 			_, err := client.CountUp(ctx, connect.NewRequest(&pingv1.CountUpRequest{Number: 1}))
+			assert.NotNil(t, err)
+			assert.Equal(t, connect.CodeOf(err), connect.CodeDeadlineExceeded)
+		})
+		t.Run("count_up_timeout_simple", func(t *testing.T) {
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			t.Cleanup(cancel)
+			_, err := clientSimple.CountUp(ctx, &pingv1.CountUpRequest{Number: 1})
 			assert.NotNil(t, err)
 			assert.Equal(t, connect.CodeOf(err), connect.CodeDeadlineExceeded)
 		})
@@ -258,6 +342,19 @@ func TestServer(t *testing.T) {
 			request := connect.NewRequest(&pingv1.CountUpRequest{Number: 5})
 			request.Header().Set(clientHeader, headerValue)
 			stream, err := client.CountUp(ctx, request)
+			assert.Nil(t, err)
+			assert.True(t, stream.Receive())
+			cancel()
+			assert.False(t, stream.Receive())
+			assert.NotNil(t, stream.Err())
+			assert.Equal(t, connect.CodeOf(stream.Err()), connect.CodeCanceled)
+			assert.Nil(t, stream.Close())
+		})
+		t.Run("count_up_cancel_after_first_response_simple", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			ctx, callInfo := connect.NewOutgoingContext(ctx)
+			callInfo.RequestHeader().Set(clientHeader, headerValue)
+			stream, err := clientSimple.CountUp(ctx, &pingv1.CountUpRequest{Number: 5})
 			assert.Nil(t, err)
 			assert.True(t, stream.Receive())
 			cancel()
@@ -382,7 +479,10 @@ func TestServer(t *testing.T) {
 			assert.Nil(t, stream.CloseResponse())
 		})
 	}
-	testErrors := func(t *testing.T, client pingv1connect.PingServiceClient) { //nolint:thelper
+	testErrors := func(t *testing.T, httpClient *http.Client, url string, opts ...connect.ClientOption) { //nolint:thelper
+		client := pingv1connect.NewPingServiceClient(httpClient, url, opts...)
+		clientSimple := pingv1connectsimple.NewPingServiceClient(httpClient, url, opts...)
+
 		assertIsHTTPMiddlewareError := func(tb testing.TB, err error) {
 			tb.Helper()
 			assert.NotNil(tb, err)
@@ -415,10 +515,34 @@ func TestServer(t *testing.T) {
 			assert.Equal(t, connectErr.Meta().Values(handlerHeader), []string{headerValue})
 			assert.Equal(t, connectErr.Meta().Values(handlerTrailer), []string{trailerValue})
 		})
+		t.Run("errors_simple", func(t *testing.T) {
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			callInfo.RequestHeader().Set(clientHeader, headerValue)
+			response, err := clientSimple.Fail(ctx, &pingv1.FailRequest{
+				Code: int32(connect.CodeResourceExhausted),
+			})
+			assert.Nil(t, response)
+			assert.NotNil(t, err)
+			var connectErr *connect.Error
+			ok := errors.As(err, &connectErr)
+			assert.True(t, ok, assert.Sprintf("conversion to *connect.Error"))
+			assert.True(t, connect.IsWireError(err))
+			assert.Equal(t, connectErr.Code(), connect.CodeResourceExhausted)
+			assert.Equal(t, connectErr.Error(), "resource_exhausted: "+errorMessage)
+			assert.Zero(t, connectErr.Details())
+			assert.Equal(t, connectErr.Meta().Values(handlerHeader), []string{headerValue})
+			assert.Equal(t, connectErr.Meta().Values(handlerTrailer), []string{trailerValue})
+		})
 		t.Run("middleware_errors_unary", func(t *testing.T) {
 			request := connect.NewRequest(&pingv1.PingRequest{})
 			request.Header().Set(clientMiddlewareErrorHeader, headerValue)
 			_, err := client.Ping(context.Background(), request)
+			assertIsHTTPMiddlewareError(t, err)
+		})
+		t.Run("middleware_errors_unary_simple", func(t *testing.T) {
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			callInfo.RequestHeader().Set(clientMiddlewareErrorHeader, headerValue)
+			_, err := clientSimple.Ping(ctx, &pingv1.PingRequest{})
 			assertIsHTTPMiddlewareError(t, err)
 		})
 		t.Run("middleware_errors_streaming", func(t *testing.T) {
@@ -429,16 +553,24 @@ func TestServer(t *testing.T) {
 			assert.False(t, stream.Receive())
 			assertIsHTTPMiddlewareError(t, stream.Err())
 		})
+		t.Run("middleware_errors_streaming_simple", func(t *testing.T) {
+			ctx, callInfo := connect.NewOutgoingContext(context.Background())
+			callInfo.RequestHeader().Set(clientMiddlewareErrorHeader, headerValue)
+			stream, err := clientSimple.CountUp(ctx, &pingv1.CountUpRequest{Number: 10})
+			assert.Nil(t, err)
+			assert.False(t, stream.Receive())
+			assertIsHTTPMiddlewareError(t, stream.Err())
+		})
 	}
 	testMatrix := func(t *testing.T, httpClient *http.Client, url string, bidi bool) { //nolint:thelper
 		run := func(t *testing.T, opts ...connect.ClientOption) {
 			t.Helper()
 			client := pingv1connect.NewPingServiceClient(httpClient, url, opts...)
 			testPing(t, httpClient, url, opts...)
-			testSum(t, client)
-			testCountUp(t, client)
+			testSum(t, httpClient, url, opts...)
+			testCountUp(t, httpClient, url, opts...)
 			testCumSum(t, client, bidi)
-			testErrors(t, client)
+			testErrors(t, httpClient, url, opts...)
 		}
 		t.Run("connect", func(t *testing.T) {
 			t.Run("proto", func(t *testing.T) {

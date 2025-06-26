@@ -193,8 +193,10 @@ func (c *Client[Req, Res]) CallClientStreamSimple(ctx context.Context) *ClientSt
 	if ok {
 		info.peer = conn.Peer()
 		info.spec = conn.Spec()
+		info.requestHeader = conn.RequestHeader()
 	}
 	return &ClientStreamForClientSimple[Req, Res]{
+		callInfo:    ctxCallInfo,
 		conn:        conn,
 		initializer: c.config.Initializer,
 	}

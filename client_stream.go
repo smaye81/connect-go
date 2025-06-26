@@ -17,6 +17,7 @@ package connect
 import (
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 )
 
@@ -28,6 +29,7 @@ import (
 type ClientStreamForClientSimple[Req, Res any] struct {
 	conn        StreamingClientConn
 	initializer maybeInitializer
+	callInfo    CallInfo
 	// Error from client construction. If non-nil, return for all calls.
 	err error
 }
@@ -73,6 +75,10 @@ func (c *ClientStreamForClientSimple[Req, Res]) CloseAndReceive() (*Res, error) 
 		_ = c.conn.CloseResponse()
 		return nil, err
 	}
+
+	maps.Copy(c.callInfo.ResponseHeader(), response.Header())
+	maps.Copy(c.callInfo.ResponseTrailer(), response.Trailer())
+
 	return response.Msg, c.conn.CloseResponse()
 }
 

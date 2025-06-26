@@ -160,8 +160,8 @@ func NewClientStreamHandlerSimple[Req, Res any](
 	return NewClientStreamHandler(
 		procedure,
 		func(ctx context.Context, stream *ClientStream[Req]) (*Response[Res], error) {
-			ctx, ci := NewOutgoingContext(ctx)
-			call, ok := ci.(*callInfo)
+			ctx, info := NewOutgoingContext(ctx)
+			call, ok := info.(*callInfo)
 			if ok {
 				call.peer = stream.Peer()
 				call.spec = stream.Spec()
